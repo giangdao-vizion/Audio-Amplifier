@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="GAIN — tải MP3/M4A và phát với mức khuếch đại 1.5× đến 5× ngay trên trình duyệt." />
+    <meta name="theme-color" content="#0a6e6a" />
+    <title>GAIN — Audio Boost</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Syne:wght@700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="grain"></div>
+    </div>
+
+    <main class="app">
+      <header class="brand-block">
+        <p class="brand" id="brand">GAIN</p>
+        <h1 class="tagline">Nghe to hơn, ngay trên trình duyệt</h1>
+        <p class="lede">Tải file MP3 hoặc M4A, chọn mức khuếch đại, rồi phát.</p>
+      </header>
+
+      <section class="stage" aria-labelledby="upload-label">
+        <input
+          type="file"
+          id="file-input"
+          class="sr-only"
+          accept=".mp3,.m4a,audio/mpeg,audio/mp4,audio/x-m4a,audio/aac"
+        />
+
+        <label for="file-input" class="dropzone" id="dropzone" tabindex="0">
+          <span class="dropzone-icon" aria-hidden="true">
+            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+              <path
+                d="M20 28V12M20 12l-6 6M20 12l6 6"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M8 30c0 2.2 3.6 4 12 4s12-1.8 12-4"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+              />
+            </svg>
+          </span>
+          <span class="dropzone-title" id="upload-label">Chọn file audio</span>
+          <span class="dropzone-hint">MP3 hoặc M4A · chạm để chọn</span>
+        </label>
+
+        <div class="file-meta" id="file-meta" hidden>
+          <p class="file-name" id="file-name"></p>
+          <button type="button" class="link-btn" id="change-file">Đổi file</button>
+        </div>
+      </section>
+
+      <section class="controls" id="controls" aria-labelledby="gain-label" hidden>
+        <div class="gain-block">
+          <h2 class="section-label" id="gain-label">Mức khuếch đại</h2>
+          <div class="gain-grid" role="radiogroup" aria-labelledby="gain-label">
+            <button type="button" class="gain-btn" role="radio" aria-checked="false" data-gain="1.5">1.5×</button>
+            <button type="button" class="gain-btn is-active" role="radio" aria-checked="true" data-gain="2">2×</button>
+            <button type="button" class="gain-btn" role="radio" aria-checked="false" data-gain="3">3×</button>
+            <button type="button" class="gain-btn" role="radio" aria-checked="false" data-gain="4">4×</button>
+            <button type="button" class="gain-btn" role="radio" aria-checked="false" data-gain="5">5×</button>
+          </div>
+          <p class="gain-note" id="gain-note">Âm thanh gấp 2 lần so với gốc</p>
+        </div>
+
+        <div class="player">
+          <canvas class="viz" id="viz" width="640" height="80" aria-hidden="true"></canvas>
+
+          <div class="transport">
+            <button type="button" class="play-btn" id="play-btn" aria-label="Phát">
+              <svg class="icon-play" width="28" height="28" viewBox="0 0 28 28" fill="currentColor" aria-hidden="true">
+                <path d="M9 6.5v15l13-7.5L9 6.5z" />
+              </svg>
+              <svg class="icon-pause" width="28" height="28" viewBox="0 0 28 28" fill="currentColor" aria-hidden="true" hidden>
+                <rect x="7" y="6" width="5" height="16" rx="1" />
+                <rect x="16" y="6" width="5" height="16" rx="1" />
+              </svg>
+            </button>
+
+            <div class="scrub">
+              <input
+                type="range"
+                id="seek"
+                class="seek"
+                min="0"
+                max="0"
+                value="0"
+                step="0.01"
+                aria-label="Vị trí phát"
+              />
+              <div class="time-row">
+                <span id="current-time">0:00</span>
+                <span id="duration">0:00</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p class="clip-warn" id="clip-warn" hidden>
+          Mức cao có thể gây méo tiếng trên loa nhỏ.
+        </p>
+      </section>
+
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
