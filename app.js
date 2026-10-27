@@ -34,22 +34,25 @@
 
   /** @type {AudioContext | null} */
   let audioCtx = null;
-  /** @type {HTMLAudioElement | null} */
-  let audioEl = null;
-  /** @type {MediaElementAudioSourceNode | null} */
-  let sourceNode = null;
   /** @type {GainNode | null} */
   let gainNode = null;
   /** @type {AnalyserNode | null} */
   let analyser = null;
-  /** @type {string | null} */
-  let objectUrl = null;
+  /** @type {AudioBuffer | null} */
+  let audioBuffer = null;
+  /** @type {AudioBufferSourceNode | null} */
+  let bufferSource = null;
+
   let currentGain = 2;
-  let rafId = 0;
+  let isPlaying = false;
+  let pauseOffset = 0;
+  let startedAtCtxTime = 0;
   let seeking = false;
+  let rafId = 0;
+  let loadToken = 0;
 
   const vizCtx = els.viz.getContext("2d");
-  const freqData = new Uint8Array(64);
+  let freqData = new Uint8Array(64);
 
   function setStatus(message, isError = false) {
     els.status.textContent = message;
@@ -71,77 +74,72 @@
     return false;
   }
 
-  function ensureAudioGraph() {
+  function getAudioContextClass() {
+    return window.AudioContext || window.webkitAudioContext || null;
+  }
+
+  async function ensureAudioGraph() {
+    const Ctx = getAudioContextClass();
+    if (!Ctx) {
+      throw new Error("Trình duyệt không hỗ trợ Web Audio API.");
+    }
+
     if (!audioCtx) {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
       audioCtx = new Ctx();
-    }
-    if (!audioEl) {
-      audioEl = new Audio();
-      audioEl.preload = "auto";
-      audioEl.crossOrigin = "anonymous";
-
-      const syncDuration = () => {
-        if (!audioEl) return;
-        const d = audioEl.duration;
-        if (!Number.isFinite(d) || d === 0) return;
-        els.seek.max = String(d);
-        els.duration.textContent = formatTime(d);
-      };
-
-      audioEl.addEventListener("loadedmetadata", syncDuration);
-      audioEl.addEventListener("durationchange", syncDuration);
-      audioEl.addEventListener("canplay", syncDuration);
-
-      audioEl.addEventListener("timeupdate", () => {
-        if (seeking || !audioEl) return;
-        els.seek.value = String(audioEl.currentTime);
-        els.currentTime.textContent = formatTime(audioEl.currentTime);
-      });
-
-      audioEl.addEventListener("ended", () => {
-        setPlayingUI(false);
-        stopVizLoop();
-        drawIdleViz();
-      });
-
-      audioEl.addEventListener("error", () => {
-        setStatus("Không phát được file này. Thử file MP3/M4A khác.", true);
-        setPlayingUI(false);
-      });
-    }
-
-    if (!sourceNode) {
-      sourceNode = audioCtx.createMediaElementSource(audioEl);
       gainNode = audioCtx.createGain();
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 128;
-      analyser.smoothingTimeConstant = 0.75;
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.8;
+      freqData = new Uint8Array(analyser.frequencyBinCount);
 
-      sourceNode.connect(gainNode);
       gainNode.connect(analyser);
       analyser.connect(audioCtx.destination);
+      gainNode.gain.value = currentGain;
     }
 
-    gainNode.gain.value = currentGain;
+    if (audioCtx.state === "suspended") {
+      await audioCtx.resume();
+    }
+
+    return audioCtx;
+  }
+
+  function getPlaybackTime() {
+    if (!audioBuffer) return 0;
+    if (!isPlaying || !audioCtx) return pauseOffset;
+    const t = pauseOffset + (audioCtx.currentTime - startedAtCtxTime);
+    return Math.min(audioBuffer.duration, Math.max(0, t));
+  }
+
+  function stopSourceNode() {
+    if (!bufferSource) return;
+    bufferSource.onended = null;
+    try {
+      bufferSource.stop(0);
+    } catch {
+      // already stopped
+    }
+    try {
+      bufferSource.disconnect();
+    } catch {
+      // ignore
+    }
+    bufferSource = null;
   }
 
   function teardownPlayback() {
     stopVizLoop();
-    if (audioEl) {
-      audioEl.pause();
-      audioEl.removeAttribute("src");
-      audioEl.load();
-    }
-    if (objectUrl) {
-      URL.revokeObjectURL(objectUrl);
-      objectUrl = null;
-    }
+    stopSourceNode();
+    isPlaying = false;
+    pauseOffset = 0;
+    startedAtCtxTime = 0;
+    audioBuffer = null;
     setPlayingUI(false);
     els.seek.value = "0";
     els.seek.max = "0";
     els.currentTime.textContent = "0:00";
     els.duration.textContent = "0:00";
+    els.playBtn.disabled = true;
     drawIdleViz();
   }
 
@@ -160,10 +158,11 @@
 
   function selectGain(gain) {
     currentGain = gain;
-    if (gainNode) {
-      const now = audioCtx?.currentTime ?? 0;
+    if (gainNode && audioCtx) {
+      const now = audioCtx.currentTime;
       gainNode.gain.cancelScheduledValues(now);
-      gainNode.gain.setTargetAtTime(gain, now, 0.03);
+      gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+      gainNode.gain.linearRampToValueAtTime(gain, now + 0.04);
     }
     els.gainBtns.forEach((btn) => {
       const active = Number(btn.dataset.gain) === gain;
@@ -171,6 +170,25 @@
       btn.setAttribute("aria-checked", active ? "true" : "false");
     });
     updateGainNote(gain);
+    if (isPlaying) setStatus(`Đang phát · ${currentGain}×`);
+  }
+
+  async function decodeFile(file) {
+    const ctx = await ensureAudioGraph();
+    const arrayBuffer = await file.arrayBuffer();
+    // copy: decodeAudioData may detach the buffer
+    const copy = arrayBuffer.slice(0);
+    return await new Promise((resolve, reject) => {
+      const onFail = (err) => reject(err || new Error("decode failed"));
+      try {
+        const result = ctx.decodeAudioData(copy, resolve, onFail);
+        if (result && typeof result.then === "function") {
+          result.then(resolve, onFail);
+        }
+      } catch (err) {
+        onFail(err);
+      }
+    });
   }
 
   async function loadFile(file) {
@@ -179,62 +197,153 @@
       return;
     }
 
+    const token = ++loadToken;
     teardownPlayback();
-    ensureAudioGraph();
-
-    objectUrl = URL.createObjectURL(file);
-    audioEl.src = objectUrl;
-
-    els.dropzone.classList.add("is-loaded");
-    els.fileMeta.hidden = false;
-    els.fileName.textContent = file.name;
-    els.controls.hidden = false;
-    setStatus("Sẵn sàng phát — chọn mức khuếch đại rồi nhấn Phát.");
+    setStatus("Đang giải mã file…");
+    els.playBtn.disabled = true;
 
     try {
-      await audioEl.play();
-      audioEl.pause();
-      audioEl.currentTime = 0;
-    } catch {
-      // Autoplay may be blocked; user will press play.
+      // Unlock audio on this user gesture (file picker / drop)
+      await ensureAudioGraph();
+      const buffer = await decodeFile(file);
+      if (token !== loadToken) return;
+
+      audioBuffer = buffer;
+      pauseOffset = 0;
+      els.seek.max = String(buffer.duration);
+      els.seek.value = "0";
+      els.duration.textContent = formatTime(buffer.duration);
+      els.currentTime.textContent = "0:00";
+      els.playBtn.disabled = false;
+
+      els.dropzone.classList.add("is-loaded");
+      els.fileMeta.hidden = false;
+      els.fileName.textContent = file.name;
+      els.controls.hidden = false;
+      setStatus("Sẵn sàng phát — chọn mức khuếch đại rồi nhấn Phát.");
+    } catch (err) {
+      console.error(err);
+      if (token !== loadToken) return;
+      teardownPlayback();
+      setStatus("Không giải mã được file. Thử MP3/M4A khác hoặc trình duyệt khác.", true);
     }
   }
 
+  function startBufferSource(offsetSec) {
+    if (!audioCtx || !audioBuffer || !gainNode) return;
+
+    stopSourceNode();
+
+    const offset = Math.min(Math.max(0, offsetSec), Math.max(0, audioBuffer.duration - 0.01));
+    bufferSource = audioCtx.createBufferSource();
+    bufferSource.buffer = audioBuffer;
+    bufferSource.connect(gainNode);
+    gainNode.gain.setValueAtTime(currentGain, audioCtx.currentTime);
+
+    bufferSource.onended = () => {
+      // Ignore stop() from pause/seek — only natural end
+      if (!isPlaying) return;
+      const nearEnd = getPlaybackTime() >= audioBuffer.duration - 0.05;
+      if (!nearEnd) return;
+      isPlaying = false;
+      pauseOffset = 0;
+      startedAtCtxTime = 0;
+      bufferSource = null;
+      setPlayingUI(false);
+      stopVizLoop();
+      els.seek.value = "0";
+      els.currentTime.textContent = "0:00";
+      drawIdleViz();
+      setStatus("Đã phát xong.");
+    };
+
+    pauseOffset = offset;
+    startedAtCtxTime = audioCtx.currentTime;
+    isPlaying = true;
+    bufferSource.start(0, offset);
+  }
+
   async function togglePlay() {
-    if (!audioEl || !audioEl.src) {
+    if (!audioBuffer) {
       setStatus("Hãy chọn file audio trước.", true);
       return;
     }
 
-    ensureAudioGraph();
-
-    if (audioCtx.state === "suspended") {
-      await audioCtx.resume();
+    try {
+      await ensureAudioGraph();
+    } catch (err) {
+      setStatus(err.message || "Không mở được audio.", true);
+      return;
     }
 
-    if (audioEl.paused) {
+    if (!isPlaying) {
       try {
-        await audioEl.play();
+        startBufferSource(pauseOffset >= audioBuffer.duration ? 0 : pauseOffset);
         setPlayingUI(true);
+        startUiClock();
         startVizLoop();
         setStatus(`Đang phát · ${currentGain}×`);
-      } catch {
-        setStatus("Trình duyệt chặn phát. Thử nhấn Phát lại.", true);
+      } catch (err) {
+        console.error(err);
+        isPlaying = false;
+        setPlayingUI(false);
+        setStatus("Không phát được. Thử nhấn Phát lại.", true);
       }
-    } else {
-      audioEl.pause();
-      setPlayingUI(false);
-      stopVizLoop();
-      drawIdleViz();
-      setStatus("Đã tạm dừng.");
+      return;
+    }
+
+    // Pause
+    pauseOffset = getPlaybackTime();
+    isPlaying = false;
+    stopSourceNode();
+    setPlayingUI(false);
+    stopVizLoop();
+    stopUiClock();
+    drawIdleViz();
+    els.seek.value = String(pauseOffset);
+    els.currentTime.textContent = formatTime(pauseOffset);
+    setStatus("Đã tạm dừng.");
+  }
+
+  function seekTo(seconds) {
+    if (!audioBuffer) return;
+    const t = Math.min(Math.max(0, seconds), audioBuffer.duration);
+    pauseOffset = t;
+    els.seek.value = String(t);
+    els.currentTime.textContent = formatTime(t);
+    if (isPlaying) {
+      startBufferSource(t);
+    }
+  }
+
+  let uiClockId = 0;
+  function startUiClock() {
+    stopUiClock();
+    const tick = () => {
+      if (!isPlaying || seeking) {
+        uiClockId = requestAnimationFrame(tick);
+        return;
+      }
+      const t = getPlaybackTime();
+      els.seek.value = String(t);
+      els.currentTime.textContent = formatTime(t);
+      uiClockId = requestAnimationFrame(tick);
+    };
+    uiClockId = requestAnimationFrame(tick);
+  }
+
+  function stopUiClock() {
+    if (uiClockId) {
+      cancelAnimationFrame(uiClockId);
+      uiClockId = 0;
     }
   }
 
   function drawIdleViz() {
     const canvas = els.viz;
     const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
+    const cssW = canvas.clientWidth || 320;
+    const cssH = canvas.clientHeight || 56;
     if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
       canvas.width = Math.floor(cssW * dpr);
       canvas.height = Math.floor(cssH * dpr);
@@ -250,10 +359,18 @@
     for (let i = 0; i < bars; i++) {
       const h = 4 + Math.sin(i * 0.45) * 3;
       vizCtx.fillStyle = "rgba(10, 110, 106, 0.22)";
-      vizCtx.beginPath();
-      vizCtx.roundRect(i * (barW + gap), mid - h / 2, barW, h, 2);
-      vizCtx.fill();
+      roundRectFill(i * (barW + gap), mid - h / 2, barW, h);
     }
+  }
+
+  function roundRectFill(x, y, w, h) {
+    if (typeof vizCtx.roundRect === "function") {
+      vizCtx.beginPath();
+      vizCtx.roundRect(x, y, w, h, 2);
+      vizCtx.fill();
+      return;
+    }
+    vizCtx.fillRect(x, y, w, h);
   }
 
   function drawViz() {
@@ -262,8 +379,8 @@
     analyser.getByteFrequencyData(freqData);
     const canvas = els.viz;
     const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
+    const cssW = canvas.clientWidth || 320;
+    const cssH = canvas.clientHeight || 56;
     if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
       canvas.width = Math.floor(cssW * dpr);
       canvas.height = Math.floor(cssH * dpr);
@@ -274,7 +391,7 @@
     const bars = 28;
     const gap = 3;
     const barW = (cssW - gap * (bars - 1)) / bars;
-    const step = Math.floor(freqData.length / bars);
+    const step = Math.max(1, Math.floor(freqData.length / bars));
 
     for (let i = 0; i < bars; i++) {
       const v = freqData[i * step] / 255;
@@ -282,9 +399,7 @@
       const y = (cssH - h) / 2;
       const alpha = 0.35 + v * 0.55;
       vizCtx.fillStyle = `rgba(6, 84, 80, ${alpha})`;
-      vizCtx.beginPath();
-      vizCtx.roundRect(i * (barW + gap), y, barW, h, 2);
-      vizCtx.fill();
+      roundRectFill(i * (barW + gap), y, barW, h);
     }
   }
 
@@ -344,9 +459,6 @@
   els.gainBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
       selectGain(Number(btn.dataset.gain));
-      if (audioEl && !audioEl.paused) {
-        setStatus(`Đang phát · ${currentGain}×`);
-      }
     });
   });
 
@@ -358,23 +470,41 @@
     seeking = true;
   });
 
-  els.seek.addEventListener("pointerup", () => {
+  const endSeek = () => {
+    if (!seeking) return;
     seeking = false;
-  });
+    seekTo(Number(els.seek.value));
+  };
+
+  els.seek.addEventListener("pointerup", endSeek);
+  els.seek.addEventListener("change", endSeek);
 
   els.seek.addEventListener("input", () => {
-    if (!audioEl) return;
     const t = Number(els.seek.value);
-    audioEl.currentTime = t;
     els.currentTime.textContent = formatTime(t);
+    if (!seeking) seekTo(t);
   });
 
   window.addEventListener("resize", () => {
-    if (audioEl && !audioEl.paused) drawViz();
+    if (isPlaying) drawViz();
     else drawIdleViz();
   });
 
+  // Unlock audio early on first tap anywhere (helps iOS)
+  const unlockOnce = async () => {
+    try {
+      await ensureAudioGraph();
+    } catch {
+      // ignore until play
+    }
+    window.removeEventListener("pointerdown", unlockOnce);
+    window.removeEventListener("touchstart", unlockOnce);
+  };
+  window.addEventListener("pointerdown", unlockOnce, { passive: true });
+  window.addEventListener("touchstart", unlockOnce, { passive: true });
+
   // Init
+  els.playBtn.disabled = true;
   selectGain(2);
   drawIdleViz();
   setStatus("");
