@@ -81,10 +81,17 @@
       audioEl.preload = "auto";
       audioEl.crossOrigin = "anonymous";
 
-      audioEl.addEventListener("loadedmetadata", () => {
-        els.seek.max = String(audioEl.duration || 0);
-        els.duration.textContent = formatTime(audioEl.duration);
-      });
+      const syncDuration = () => {
+        if (!audioEl) return;
+        const d = audioEl.duration;
+        if (!Number.isFinite(d) || d === 0) return;
+        els.seek.max = String(d);
+        els.duration.textContent = formatTime(d);
+      };
+
+      audioEl.addEventListener("loadedmetadata", syncDuration);
+      audioEl.addEventListener("durationchange", syncDuration);
+      audioEl.addEventListener("canplay", syncDuration);
 
       audioEl.addEventListener("timeupdate", () => {
         if (seeking || !audioEl) return;
